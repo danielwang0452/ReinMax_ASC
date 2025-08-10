@@ -4,8 +4,11 @@ import torch.nn.functional as F
 
 from .basic import rao_gumbel, gst_mover, exact, \
     st, reinmax_mean_baseline 
-
+#import reinmax
+#print(reinmax.__file__)
 from reinmax import reinmax
+
+
 
 simple_method_mapping = {
     'reinmax': reinmax,
@@ -16,12 +19,16 @@ simple_method_mapping = {
 repeat_method_mapping = {
     'rao': ('rao_gumbel', rao_gumbel, int),
 }
-def categorical_repara(logits, temp, method = 'gumbel'):
-    
+def categorical_repara(logits, temp, method = 'gumbel', alpha=1.0):
+
     if method == 'gumbel':
         qy = F.softmax(logits, dim=-1)
         return F.gumbel_softmax(logits, tau=temp, hard=True), qy
-    
+
+    elif method == 'reinmax':
+        sample, qy = reinmax(logits, tau=temp, alpha=alpha)
+        return sample, qy
+
     elif method in simple_method_mapping:
         sample, qy = simple_method_mapping[method](logits, tau=temp)
         return sample, qy

@@ -6,8 +6,7 @@ import torch.nn.functional as F
 from torch import nn, optim
 from model.categorical import categorical_repara
 import random
-
-
+import numpy as np
 
 parser = argparse.ArgumentParser(description='VAE MNIST Example')
 parser.add_argument('--batch-size', type=int, default=64, metavar='N',
@@ -18,15 +17,15 @@ parser.add_argument('--epochs', type=int, default=40, metavar='N',
                     help='number of epochs to train')
 parser.add_argument('--temperature', type=float, default=1.0, metavar='S',
                     help='softmax temperature')
-parser.add_argument('--alpha', type=float, default=2/3, metavar='S',
-                    help='RK 2nd order parameter') # 0.5 -> midpoint, 1 -> Heun, 2/3 -> Ralston
+parser.add_argument('--alpha', type=float, default=1.0, metavar='S',
+                    help='RK 2nd order parameter')  # 0.5 -> midpoint, 1 -> Heun, 2/3 -> Ralston
 parser.add_argument('--no-cuda', action='store_true', default=False,
                     help='enables CUDA training')
 parser.add_argument('--seed', type=int, default=1, metavar='S',
                     help='random seed')
 parser.add_argument('--method', default='reinmax',
                     help='gumbel, st, rao_gumbel, gst-1.0, reinmax')
-parser.add_argument('--lr', type=float, default=1e-3, 
+parser.add_argument('--lr', type=float, default=1e-3,
                     help="learning rate for the optimizer")
 parser.add_argument('--latent-dim', type=int, default=128,
                     help="latent dimension")
@@ -42,12 +41,12 @@ torch.manual_seed(args.seed)
 if args.cuda:
     torch.cuda.manual_seed(args.seed)
 
+
 class Quadratic_Toy(nn.Module):
     def __init__(self):
-        super(Quadratic_Toy, self).__init__()        
+        super(Quadratic_Toy, self).__init__()
         self.theta = nn.Parameter(torch.Tensor(latent_dim, categorical_dim))
         self.theta.data.uniform_(-0.01, 0.01)
-
 
     def forward(self, temp, batch_size, alpha):
         theta_b = self.theta.unsqueeze(0).expand(batch_size, -1, -1).contiguous()
@@ -55,7 +54,7 @@ class Quadratic_Toy(nn.Module):
             qy = F.softmax(theta_b, dim=-1)
             z = torch.distributions.one_hot_categorical.OneHotCategorical(logits=theta_b).sample()
             log_y = (z * theta_b).sum(dim=-1) - torch.logsumexp(theta_b, dim=-1)
-        else: 
+        else:
             z, qy = categorical_repara(theta_b, temp, self.method, alpha)
             log_y = None
         z = z.view(batch_size, -1, categorical_dim)[:, :, 0]
@@ -68,25 +67,19 @@ categorical_dim = 2  # one-of-K vector
 targets = torch.Tensor([0.45]).repeat(args.latent_dim).contiguous()
 batched_targets = targets.unsqueeze(0).expand(args.batch_size, -1)
 
-model = Quadratic_Toy()
-if args.cuda:
-    model.cuda()
-    targets = targets.cuda()
-    batched_targets = batched_targets.cuda()
-optimizer = optim.Adam(model.parameters(), lr=args.lr)
-model.method = args.method
-
 def loss_scale(mse):
     return mse.abs().pow(args.pnorm)
-    
+
+
 # Reconstruction + KL divergence losses summed over all elements and batch
 def loss_function(z):
     # MSE = (z - batched_targets).square().sum() / z.size(0) / latent_dim
-    MSE = loss_scale(z - batched_targets).sum(dim = -1) / latent_dim
+    MSE = loss_scale(z - batched_targets).sum(dim=-1) / latent_dim
     # MSE = MSE.pow(1/4).sum() / z.size(0)
     MSE = MSE.sum() / z.size(0)
 
     return MSE
+
 
 def reinforce_train(epoch):
     model.train()
@@ -101,12 +94,13 @@ def reinforce_train(epoch):
 
         optimizer.zero_grad()
         loss.backward()
-        
+
         train_loss += (MSE.sum() / z.size(0)).item()
         optimizer.step()
 
     print('====> Epoch: {} Average loss: {:.4f}'.format(
         epoch, train_loss / args.train_step_per_epoch))
+
 
 def exact_reinforce_train(epoch):
     model.train()
@@ -120,19 +114,20 @@ def exact_reinforce_train(epoch):
         MSE_0 = loss_scale(batched_targets)
         loss = MSE_1 * qy[:, 0] + MSE_0 * qy[:, 1]
         loss = loss.sum() / latent_dim
-        
+
         optimizer.zero_grad()
         loss.backward()
-        
+
         train_loss += (loss.sum()).item()
         optimizer.step()
 
-def train(epoch):
+
+def train(model, optimizer, epoch, beta):
     train_metrics = {}
     model.train()
     train_loss = 0
     temp = args.temperature
-    alpha = args.alpha
+    alpha = 0.5/(1-beta+1e-7)
     for batch_idx in enumerate(range(args.train_step_per_epoch)):
         z, qy, _ = model(temp, args.batch_size, alpha)
         loss = loss_function(z)
@@ -141,9 +136,10 @@ def train(epoch):
         train_loss += loss.item()
         optimizer.step()
     train_metrics['train_loss'] = loss.item()
-    print('====> Epoch: {} Average loss: {:.4f}'.format(
-        epoch, train_loss / args.train_step_per_epoch))
+    #print('====> Epoch: {} Average loss: {:.4f}'.format(
+    #    epoch, train_loss / args.train_step_per_epoch))
     return train_metrics
+
 
 def soft_train(epoch):
     model.train()
@@ -156,7 +152,7 @@ def soft_train(epoch):
         loss.backward()
         train_loss += loss.item()
         optimizer.step()
-    
+
     qy = F.softmax(model.theta, dim=-1)
     # MSE_1 = (1 - targets).square()
     # MSE_0 = targets.square()
@@ -164,25 +160,61 @@ def soft_train(epoch):
     MSE_0 = loss_scale(targets)
     loss = MSE_1 * qy[:, 0] + MSE_0 * qy[:, 1]
     loss = loss.sum() / latent_dim
-    print('====> Epoch: {} Average loss: {:.4f}'.format(
-        epoch, loss))
+    #print('====> Epoch: {} Average loss: {:.4f}'.format(
+    #    epoch, loss))
+
 
 def run():
     wandb.init(
         project="ReinMax_ASC",
+        config={
+            "alpha": args.alpha,  # default but overwritten by sweep
+        },
         name=f"{args.method}_{random.randint(1, 100000)}"
     )
+    n_runs = 100
+    results = []
+    x_vals = np.linspace(-0.5, 1.5, n_runs).tolist()
 
-    for epoch in range(1, args.epochs + 1):
-        metrics = {}
-        if model.method == 'reinforce_exact':
-            exact_reinforce_train(epoch)
-        elif model.method == 'reinforce':
-            reinforce_train(epoch)
-        else:
-            train_metrics = train(epoch)
-            metrics.update(train_metrics)
-        wandb.log(metrics)
+    for run in range(n_runs):
+        print(run)
+        torch.manual_seed(args.seed)
+        model = Quadratic_Toy()
+        if args.cuda:
+            model.cuda()
+            targets = targets.cuda()
+            batched_targets = batched_targets.cuda()
+        optimizer = optim.Adam(model.parameters(), lr=args.lr)
+        model.method = args.method
+
+        if args.cuda:
+            torch.cuda.manual_seed(args.seed)
+
+        for epoch in range(1, args.epochs + 1):
+            metrics = {}
+            if model.method == 'reinforce_exact':
+                exact_reinforce_train(epoch)
+            elif model.method == 'reinforce':
+                reinforce_train(epoch)
+            else:
+                train_metrics = train(model, optimizer, epoch, x_vals[run])
+                metrics.update(train_metrics)
+        print(metrics['train_loss'])
+        results.append((x_vals[run], metrics['train_loss']))
+    # log in W&B
+    table = wandb.Table(columns=["beta", "train_loss"])
+    for x_val, y_val in results:
+        table.add_data(float(x_val), float(y_val))
+
+    wandb.log({
+        "sweep_results": table,
+        "train_loss_vs_beta": wandb.plot.line(
+            table, "beta", "train_loss", title="Train Loss vs Alpha"
+        )
+    })
+
     wandb.finish()
+
+
 if __name__ == '__main__':
     run()
