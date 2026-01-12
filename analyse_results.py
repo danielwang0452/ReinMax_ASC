@@ -1,7 +1,7 @@
 import json
 from pathlib import Path
 
-json_dir = Path("results/results_reinmax_8x16")
+json_dir = Path("results/results_reinmax_cv_8x16_radam")
 
 #json_dir = Path("results_8x4")
 all_configs = {}
@@ -17,9 +17,10 @@ for key, value in all_configs.items():
     average = [0, 0]
     #print(key)
     for k, v in value.items():
+        if k[-1] == "0":
         #print(v)
-        average[0] += v[0]# 0.1 * v[0]
-        average[1] +=v[1]# 0.1 * v[1]
+            average[0] += v[0]# 0.1 * v[0]
+            average[1] += v[1]# 0.1 * v[1]
     avg_results[key] = average
     print(avg_results)
 
