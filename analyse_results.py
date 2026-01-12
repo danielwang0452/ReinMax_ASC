@@ -1,7 +1,7 @@
 import json
 from pathlib import Path
 
-json_dir = Path("results/results_reinmax_cv_64x8_2")
+json_dir = Path("results/results_reinmax_cv_16x12_2_radam")
 
 #json_dir = Path("results_8x4")
 all_configs = {}
@@ -27,6 +27,7 @@ min_loss = 3000
 for key, value in avg_results.items():
     if value[0] < min_loss:
         min_loss = value[0]
+        min_train_loss = value[1]
         min_key = key
 
-print(min_key, min_loss)
+print(min_key, min_loss, min_train_loss)

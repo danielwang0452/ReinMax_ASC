@@ -75,8 +75,11 @@ def train(model, optimizer, epoch, train_loader, test_loader):
     #print(args.gradient_estimate_sample)
     #print(args.gradient_estimate_sample)
     bstd, norm = model.get_sample_variance(data[:args.gradient_estimate_sample, :], 1024)
+    rb0, rb1, bstd, cos, norm = model.analyze_gradient(data[:args.gradient_estimate_sample, :], 1024)
+    #train_metrics['bstd'] = bstd
+    metrics['cos'] = cos
     metrics['Relative Std w.r.t. approx grad'] = bstd
-    metrics['grad_norm'] = norm
+    #metrics['grad_norm'] = norm
     model.zero_grad()
 
     return metrics
@@ -116,7 +119,7 @@ if __name__ == '__main__':
     parser.add_argument('-s', '--gradient-estimate-sample', type=int, default=100,
                         help="number of samples used to estimate gradient bias (default 0: not estimate)")
 
-    categorical_dim, latent_dim = 10, 30
+    categorical_dim, latent_dim = 8, 4
     print(categorical_dim, latent_dim)
     methods = ['reinmax_cv']#, 'gumbel', 'st', 'rao_gumbel', 'gst-1.0', 'reinmax'], reinmax_test
     args = parser.parse_args()
@@ -176,7 +179,6 @@ if __name__ == '__main__':
             print(epoch)
             train_metrics = train(model, optimizer, epoch, train_loader, test_loader)
             print(train_metrics)
-
             wandb.log(train_metrics, step = epoch)
             if epoch+1 in [50, 160]:
                 torch.save(model.state_dict(), f'/Users/danielwang/PycharmProjects/ReinMax_ASC/model_checkpoints/vae_{model.method}_{latent_dim}x{categorical_dim}_epoch_{epoch+1}.pth')
