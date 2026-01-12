@@ -9,6 +9,76 @@ matplotlib.rcParams['ps.fonttype'] = 42
 from baseline_hypers import hyperparameters as baseline_hyperparameters
 
 
+def check_reinmax_cv_status(results_dir='./results'):
+    """Check status of reinmax_cv files - missing, incomplete, or completed"""
+    results_path = Path(results_dir)
+    if not results_path.exists():
+        return
+    
+    categorical_dim_options = [8, 4, 8, 16, 64, 10]
+    latent_dim_options = [4, 24, 16, 12, 8, 30]
+    seeds = range(10)
+    tau2_options = [0.1, 0.3, 0.5, 0.7, 1.0, 1.1, 1.2, 1.3, 1.4, 1.5]
+    eta_options = [0.1, 0.3, 0.5, 0.7, 1.0, 1.5, 2.0]
+    
+    missing = []
+    incomplete = []
+    completed = []
+    
+    for cat_dim, lat_dim in zip(categorical_dim_options, latent_dim_options):
+        # Get baseline reinmax hyperparameters
+        key = ('reinmax', cat_dim, lat_dim)
+        if key not in baseline_hyperparameters:
+            continue
+        
+        baseline_lr, baseline_temp, baseline_optimizer = baseline_hyperparameters[key]
+        
+        for seed in seeds:
+            configs_for_seed = []
+            for tau2 in tau2_options:
+                for eta in eta_options:
+                    fname = f"results_seed{seed}_reinmax_cv_cat{cat_dim}_lat{lat_dim}_opt{baseline_optimizer}_lr{baseline_lr}_temp{baseline_temp}_eta{eta}_tau2{tau2}.txt"
+                    fpath = results_path / fname
+                    
+                    if not fpath.exists():
+                        configs_for_seed.append((eta, tau2, 'MISSING'))
+                    else:
+                        try:
+                            data = np.loadtxt(fpath, delimiter=',')
+                            if len(data) < 160:
+                                configs_for_seed.append((eta, tau2, f'INCOMPLETE({len(data)}/160)'))
+                            else:
+                                configs_for_seed.append((eta, tau2, 'OK'))
+                        except:
+                            configs_for_seed.append((eta, tau2, 'ERROR'))
+            
+            # Summarize for this seed
+            statuses = [s[2] for s in configs_for_seed]
+            ok_count = statuses.count('OK')
+            missing_count = sum(1 for s in statuses if 'MISSING' in s)
+            incomplete_count = sum(1 for s in statuses if 'INCOMPLETE' in s)
+            error_count = statuses.count('ERROR')
+            
+            if ok_count == len(configs_for_seed):
+                completed.append((cat_dim, lat_dim, seed))
+            elif missing_count > 0 or incomplete_count > 0:
+                incomplete.append(f"Cat{cat_dim}_Lat{lat_dim}_Seed{seed}: {ok_count}/{len(configs_for_seed)} OK, {missing_count} MISSING, {incomplete_count} INCOMPLETE, {error_count} ERROR")
+    
+    print("\n" + "="*120)
+    print("REINMAX_CV FILE STATUS")
+    print("="*120)
+    print(f"\nCompleted configurations (all 10 seeds with all eta/tau2 combos): {len(completed)}")
+    
+    if incomplete:
+        print(f"\nIncomplete/Missing ({len(incomplete)} seed-configs):")
+        for item in incomplete[:30]:  # Show first 30
+            print(f"  {item}")
+        if len(incomplete) > 30:
+            print(f"  ... and {len(incomplete) - 30} more")
+    else:
+        print("\nAll reinmax_cv files completed!")
+
+
 def load_results(results_dir='./results'):
     """Load all result files organized by configuration"""
     results = defaultdict(lambda: defaultdict(dict))
@@ -28,7 +98,11 @@ def load_results(results_dir='./results'):
     methods = ["reinmax_v3"]
     seeds = range(10)
     
-    # Loop through all parameter combinations
+    # Define tau2 and eta options for reinmax_cv
+    tau2_options = [0.1, 0.3, 0.5, 0.7, 1.0, 1.1, 1.2, 1.3, 1.4, 1.5]
+    eta_options = [0.1, 0.3, 0.5, 0.7, 1.0, 1.5, 2.0]
+    
+    # Loop through all parameter combinations for reinmax_v3
     for cat_dim, lat_dim in zip(categorical_dim_options, latent_dim_options):
         for method in methods:
             for optimizer in optimizer_options:
@@ -73,8 +147,101 @@ def load_results(results_dir='./results'):
                                     continue
                             else:
                                 print(f"File not found: {filename}")
+    
+    # Handle reinmax_cv separately - find best tau2/eta for each config using baseline reinmax hyperparameters
+    # Average across seeds first, then pick the best (eta, tau2) combination
+    reinmax_cv_best_hypers = {}  # Track best hyperparameters for each config
+    
+    for cat_dim, lat_dim in zip(categorical_dim_options, latent_dim_options):
+        # Get baseline reinmax hyperparameters for this configuration
+        key = ('reinmax', cat_dim, lat_dim)
+        if key not in baseline_hyperparameters:
+            continue
+            
+        baseline_lr, baseline_temp, baseline_optimizer = baseline_hyperparameters[key]
+        
+        # Collect results for all (eta, tau2) combinations across all seeds
+        combo_results = {}  # (eta, tau2) -> {seed: {train_loss, test_loss, sample_std}}
+        
+        for tau2 in tau2_options:
+            for eta in eta_options:
+                combo_results[(eta, tau2)] = {}
+                for seed in seeds:
+                    fname = f"results_seed{seed}_reinmax_cv_cat{cat_dim}_lat{lat_dim}_opt{baseline_optimizer}_lr{baseline_lr}_temp{baseline_temp}_eta{eta}_tau2{tau2}.txt"
+                    fpath = results_path / fname
+                    
+                    if fpath.exists():
+                        try:
+                            metrics = np.loadtxt(fpath, delimiter=',')
+                            
+                            # Skip files that don't have all 160 epochs
+                            if len(metrics) < 160:
+                                continue
+                            
+                            # Get last epoch
+                            last_epoch = metrics[-1]
+                            combo_results[(eta, tau2)][seed] = {
+                                'train_loss': last_epoch[0],
+                                'test_loss': last_epoch[3],
+                                'sample_std': last_epoch[-2],
+                            }
+                        except Exception as e:
+                            pass
+                    else:
+                        print(f"File not found: {fpath}")
+        
+        # Find the best (eta, tau2) based on average train loss across seeds
+        best_avg_loss = float('inf')
+        best_combo = None
+        
+        for (eta, tau2), seed_results in combo_results.items():
+            # if len(seed_results) >= 5:  # Require at least 5 seeds for a valid average
+            avg_train_loss = np.mean([r['train_loss'] for r in seed_results.values()])
+            if avg_train_loss < best_avg_loss:
+                best_avg_loss = avg_train_loss
+                best_combo = (eta, tau2)
+        
+        # Store results using the best (eta, tau2) for all seeds
+        if best_combo is not None:
+            config_key = (cat_dim, lat_dim, 'reinmax_cv', baseline_optimizer, baseline_lr, baseline_temp)
+            for seed, result in combo_results[best_combo].items():
+                results[config_key][seed] = result
+            
+            reinmax_cv_best_hypers[(cat_dim, lat_dim)] = {
+                'best_eta': best_combo[0],
+                'best_tau2': best_combo[1],
+                'avg_train_loss': best_avg_loss,
+                'n_seeds': len(combo_results[best_combo]),
+            }
+    
+    # Print summary of best hyperparameters
+    if reinmax_cv_best_hypers:
+        print_reinmax_cv_hyperparameters(reinmax_cv_best_hypers)
         
     return results
+
+def print_reinmax_cv_hyperparameters(reinmax_cv_best_hypers):
+    """Print summary of best eta and tau2 for reinmax_cv"""
+    print("\n" + "="*80)
+    print("REINMAX-CV BEST HYPERPARAMETERS (selected by avg train loss across seeds)")
+    print("="*80)
+    print(f"{'Config':<12} {'Best η':<10} {'Best τ²':<10} {'Avg Train Loss':<18} {'N Seeds'}")
+    print("-"*80)
+    
+    configs = [(8, 4), (4, 24), (8, 16), (16, 12), (64, 8), (10, 30)]
+    
+    for cat_dim, lat_dim in configs:
+        if (cat_dim, lat_dim) not in reinmax_cv_best_hypers:
+            print(f"{cat_dim}×{lat_dim:<9} {'N/A':<10} {'N/A':<10} {'N/A':<18} N/A")
+            continue
+        
+        info = reinmax_cv_best_hypers[(cat_dim, lat_dim)]
+        config_label = f"{cat_dim}×{lat_dim}"
+        
+        print(f"{config_label:<12} {info['best_eta']:<10} {info['best_tau2']:<10} {info['avg_train_loss']:<18.4f} {info['n_seeds']}")
+    
+    print("="*80 + "\n")
+
 
 def compute_statistics(results):
     """Compute mean and std error for each configuration"""
@@ -168,6 +335,8 @@ def load_baseline_results(results_dir='./results'):
                 except Exception as e:
                     print(f"Error loading {filename}: {e}")
                     continue
+            else:
+                print(f"File not found: {filename}")
     
     return results
 
@@ -237,7 +406,7 @@ def print_sample_std_comparison(stats, baseline_stats):
     
     baseline_methods = ['gumbel', 'rao_gumbel', 'gst-1.0', 'st', 'reinmax']
     # new_methods = ['reinmax_v2', 'reinmax_v3']
-    new_methods = ['reinmax_v3']
+    new_methods = ['reinmax_v3', 'reinmax_cv']
     
     for cat_dim, lat_dim in configs:
         print(f"\n{'='*100}")
@@ -302,7 +471,7 @@ def print_comparison_results(stats, baseline_stats):
     
     baseline_methods = ['gumbel', 'rao_gumbel', 'gst-1.0', 'st', 'reinmax']
     # new_methods = ['reinmax_v2', 'reinmax_v3']
-    new_methods = ['reinmax_v3']
+    new_methods = ['reinmax_v3', 'reinmax_cv']
     
     for cat_dim, lat_dim in configs:
         print(f"\n{'='*120}")
@@ -348,12 +517,15 @@ def print_comparison_results(stats, baseline_stats):
                 print(f"{method:<15} {'--':<10} {'--':<10} {'--':<8} {'N/A':<25} {'N/A':<25} {'--':<5}")
 
 
-def print_elbo_tables(stats, baseline_stats):
+def print_elbo_tables(stats, baseline_stats, results=None, baseline_results=None):
     """
     Print train and test ELBO tables in plain text and LaTeX format.
     Rows: methods (Gumbel, Gumbel-Rao, ST, GST-1.0, Reinmax, Reinmax-V2, Reinmax-V3)
     Columns: configurations (8x4, 4x24, 8x16, 16x12, 64x8, 10x30)
     Highlights best (bold) and second best (underline).
+    
+    If results and baseline_results are provided, computes average rank based on 
+    individual seed rankings (not aggregated stats).
     """
     # Define methods and their display names
     methods_info = [
@@ -363,16 +535,18 @@ def print_elbo_tables(stats, baseline_stats):
         ('gst-1.0', 'GST-1.0'),
         ('reinmax', 'ReinMax'),
         # ('reinmax_v2', 'ReinMax-V2'),
-        ('reinmax_v3', 'ReinMax-V3'),
+        ('reinmax_v3', 'ReinMax-Rao'),
+        ('reinmax_cv', 'ReinMax-CV'),
     ]
     
     # Define configurations in order
     configs = [(8, 4), (4, 24), (8, 16), (16, 12), (64, 8), (10, 30)]
     config_labels = ['8×4', '4×24', '8×16', '16×12', '64×8', '10×30']
     
-    # Helper function to get best result for a method and config (selected by train loss)
-    def get_best_result(method, cat_dim, lat_dim, metric='train_loss_mean'):
+    # Helper function to get best config_key for a method (selected by train loss mean)
+    def get_best_config_key(method, cat_dim, lat_dim, metric='train_loss_mean'):
         best_stat = None
+        best_config_key = None
         
         # Check baseline stats first
         for config_key, stat in baseline_stats.items():
@@ -380,6 +554,7 @@ def print_elbo_tables(stats, baseline_stats):
             if c_dim == cat_dim and l_dim == lat_dim and m == method:
                 if best_stat is None or stat[metric] < best_stat[metric]:
                     best_stat = stat
+                    best_config_key = config_key
         
         # Check new method stats
         for config_key, stat in stats.items():
@@ -387,7 +562,13 @@ def print_elbo_tables(stats, baseline_stats):
             if c_dim == cat_dim and l_dim == lat_dim and m == method:
                 if best_stat is None or stat[metric] < best_stat[metric]:
                     best_stat = stat
+                    best_config_key = config_key
         
+        return best_config_key, best_stat
+    
+    # Helper function to get best result for a method and config (selected by train loss)
+    def get_best_result(method, cat_dim, lat_dim, metric='train_loss_mean'):
+        _, best_stat = get_best_config_key(method, cat_dim, lat_dim, metric)
         return best_stat
     
     # Build data for tables: (mean, std_error)
@@ -407,13 +588,14 @@ def print_elbo_tables(stats, baseline_stats):
                 train_data[method_name].append((None, None))
                 test_data[method_name].append((None, None))
     
-    def find_best_and_second_per_column(data):
+    def find_top_three_per_column(data):
         """
-        Find best and second best methods for each column.
-        Returns: (best_methods, second_best_methods)
+        Find best, second best, and third best methods for each column.
+        Returns: (best_methods, second_best_methods, third_best_methods)
         """
         best_methods = []
         second_best_methods = []
+        third_best_methods = []
         
         for col_idx in range(len(configs)):
             # Get all valid (method, mean) tuples for this column
@@ -435,24 +617,218 @@ def print_elbo_tables(stats, baseline_stats):
                 second_best_methods.append(valid_entries[1][0])
             else:
                 second_best_methods.append(None)
+            
+            if len(valid_entries) >= 3:
+                third_best_methods.append(valid_entries[2][0])
+            else:
+                third_best_methods.append(None)
         
-        return best_methods, second_best_methods
+        return best_methods, second_best_methods, third_best_methods
     
-    train_best, train_second = find_best_and_second_per_column(train_data)
-    test_best, test_second = find_best_and_second_per_column(test_data)
+    train_best, train_second, train_third = find_top_three_per_column(train_data)
+    test_best, test_second, test_third = find_top_three_per_column(test_data)
+    
+    def compute_average_ranks_per_seed(metric='train_loss', selection_metric='train_loss_mean'):
+        """
+        Compute average rank for each method across all configurations and seeds.
+        Ranks are computed for each individual seed, then averaged.
+        
+        Args:
+            metric: 'train_loss' or 'test_loss' - the metric to rank on
+            selection_metric: metric used to select best hyperparameters
+        
+        Returns: dict of method_name -> (average_rank, std_error)
+        """
+        if results is None or baseline_results is None:
+            # Fall back to stats-based ranking if raw results not provided
+            return compute_average_ranks_from_stats(train_data if metric == 'train_loss' else test_data)
+        
+        method_names = [m[1] for m in methods_info]
+        method_keys = [m[0] for m in methods_info]
+        ranks_per_method = {m: [] for m in method_names}
+        
+        # For each configuration
+        for col_idx, (cat_dim, lat_dim) in enumerate(configs):
+            # Get the best config_key for each method (based on selection_metric)
+            method_config_keys = {}
+            for method_key, method_name in methods_info:
+                config_key, _ = get_best_config_key(method_key, cat_dim, lat_dim, selection_metric)
+                if config_key is not None:
+                    method_config_keys[method_name] = config_key
+            
+            # Get raw results for each method's best config
+            method_raw_results = {}
+            for method_name, config_key in method_config_keys.items():
+                # Check both results and baseline_results
+                if config_key in results:
+                    method_raw_results[method_name] = results[config_key]
+                elif config_key in baseline_results:
+                    method_raw_results[method_name] = baseline_results[config_key]
+            
+            # Find all seeds that are common across all methods with data
+            if not method_raw_results:
+                continue
+            
+            # Get all seeds available
+            all_seeds = set()
+            for method_name, seed_data in method_raw_results.items():
+                all_seeds.update(seed_data.keys())
+            
+            # For each seed, rank the methods
+            for seed in all_seeds:
+                # Collect (method_name, loss_value) for methods that have this seed
+                seed_entries = []
+                for method_name, seed_data in method_raw_results.items():
+                    if seed in seed_data:
+                        loss_val = seed_data[seed][metric]
+                        seed_entries.append((method_name, loss_val))
+                
+                # Sort by loss (ascending - lower is better)
+                seed_entries.sort(key=lambda x: x[1])
+                
+                # Assign ranks (1-based)
+                for rank, (method_name, _) in enumerate(seed_entries, 1):
+                    ranks_per_method[method_name].append(rank)
+        
+        # Compute average rank and standard error for each method
+        avg_ranks = {}
+        for method_name in method_names:
+            if ranks_per_method[method_name]:
+                ranks = ranks_per_method[method_name]
+                mean_rank = np.mean(ranks)
+                std_error = np.std(ranks) / np.sqrt(len(ranks))
+                print(np.std(ranks), len(ranks))
+                avg_ranks[method_name] = (mean_rank, std_error)
+            else:
+                avg_ranks[method_name] = None
+        
+        return avg_ranks
+    
+    def compute_average_ranks_from_stats(data):
+        """
+        Fallback: Compute average rank for each method using aggregated stats.
+        Returns: dict of method_name -> (average_rank, std_error)
+        """
+        method_names = [m[1] for m in methods_info]
+        ranks_per_method = {m: [] for m in method_names}
+        
+        for col_idx in range(len(configs)):
+            # Get all valid (method, mean) tuples for this column
+            valid_entries = []
+            for method_name in method_names:
+                val, std = data[method_name][col_idx]
+                if val is not None:
+                    valid_entries.append((method_name, val))
+            
+            # Sort by mean (ascending - lower is better)
+            valid_entries.sort(key=lambda x: x[1])
+            
+            # Assign ranks (1-based)
+            for rank, (method_name, _) in enumerate(valid_entries, 1):
+                ranks_per_method[method_name].append(rank)
+        
+        # Compute average rank and standard error for each method
+        avg_ranks = {}
+        for method_name in method_names:
+            if ranks_per_method[method_name]:
+                ranks = ranks_per_method[method_name]
+                mean_rank = np.mean(ranks)
+                std_error = np.std(ranks) / np.sqrt(len(ranks))
+                avg_ranks[method_name] = (mean_rank, std_error)
+            else:
+                avg_ranks[method_name] = None
+        
+        return avg_ranks
+    
+    # Compute average ranks using per-seed ranking (for tables selected by train loss)
+    train_avg_ranks = compute_average_ranks_per_seed(metric='train_loss', selection_metric='train_loss_mean')
+    test_avg_ranks = compute_average_ranks_per_seed(metric='test_loss', selection_metric='train_loss_mean')
+    
+    # Define ReinMax variants for rank computation
+    reinmax_variants = ['ReinMax', 'ReinMax-Rao', 'ReinMax-CV']
+    
+    def compute_reinmax_only_ranks(metric='train_loss', selection_metric='train_loss_mean'):
+        """
+        Compute average rank for ReinMax variants only across all configurations and seeds.
+        Returns: dict of method_name -> (average_rank, std_error) for ReinMax variants, None for others
+        """
+        if results is None or baseline_results is None:
+            return {m: None for m in [mi[1] for mi in methods_info]}
+        
+        reinmax_methods_info = [(k, n) for k, n in methods_info if n in reinmax_variants]
+        method_names = [m[1] for m in reinmax_methods_info]
+        ranks_per_method = {m: [] for m in method_names}
+        
+        # For each configuration
+        for col_idx, (cat_dim, lat_dim) in enumerate(configs):
+            # Get the best config_key for each ReinMax method (based on selection_metric)
+            method_config_keys = {}
+            for method_key, method_name in reinmax_methods_info:
+                config_key, _ = get_best_config_key(method_key, cat_dim, lat_dim, selection_metric)
+                if config_key is not None:
+                    method_config_keys[method_name] = config_key
+            
+            # Get raw results for each method's best config
+            method_raw_results = {}
+            for method_name, config_key in method_config_keys.items():
+                if config_key in results:
+                    method_raw_results[method_name] = results[config_key]
+                elif config_key in baseline_results:
+                    method_raw_results[method_name] = baseline_results[config_key]
+            
+            if not method_raw_results:
+                continue
+            
+            # Get all seeds available
+            all_seeds = set()
+            for method_name, seed_data in method_raw_results.items():
+                all_seeds.update(seed_data.keys())
+            
+            # For each seed, rank the ReinMax methods only
+            for seed in all_seeds:
+                seed_entries = []
+                for method_name, seed_data in method_raw_results.items():
+                    if seed in seed_data:
+                        loss_val = seed_data[seed][metric]
+                        seed_entries.append((method_name, loss_val))
+                
+                # Sort by loss (ascending - lower is better)
+                seed_entries.sort(key=lambda x: x[1])
+                
+                # Assign ranks (1-based)
+                for rank, (method_name, _) in enumerate(seed_entries, 1):
+                    ranks_per_method[method_name].append(rank)
+        
+        # Compute average rank and standard error for ReinMax methods
+        avg_ranks = {}
+        for method_key, method_name in methods_info:
+            if method_name in reinmax_variants and ranks_per_method.get(method_name):
+                ranks = ranks_per_method[method_name]
+                mean_rank = np.mean(ranks)
+                std_error = np.std(ranks) / np.sqrt(len(ranks))
+                avg_ranks[method_name] = (mean_rank, std_error)
+            else:
+                avg_ranks[method_name] = None
+        
+        return avg_ranks
+    
+    # Compute ReinMax-only ranks
+    train_reinmax_ranks = compute_reinmax_only_ranks(metric='train_loss', selection_metric='train_loss_mean')
+    test_reinmax_ranks = compute_reinmax_only_ranks(metric='test_loss', selection_metric='train_loss_mean')
     
     # ==================== PLAIN TEXT TABLES ====================
-    print("\n" + "="*130)
-    print("TRAIN ELBO TABLE (** = best, * = second best)")
-    print("="*130)
+    print("\n" + "="*165)
+    print("TRAIN ELBO TABLE (** = best, * = second best, ~ = third best)")
+    print("="*165)
     
     # Header
     col_width = 20
     header = f"{'Method':<15}"
     for label in config_labels:
         header += f"{label:^{col_width}}"
+    header += f"{'Avg Rank':^{col_width}}"
     print(header)
-    print("-" * (15 + col_width * len(configs)))
+    print("-" * (15 + col_width * (len(configs) + 1)))
     
     # Rows
     for method_key, method_name in methods_info:
@@ -464,18 +840,29 @@ def print_elbo_tables(stats, baseline_stats):
                     cell = f"**{cell}"
                 elif train_second[col_idx] == method_name:
                     cell = f"*{cell}"
+                elif train_third[col_idx] == method_name:
+                    cell = f"~{cell}"
+                else:
+                    cell = f"({cell})"
             else:
                 cell = "N/A"
             row += f"{cell:^{col_width}}"
+        # Add rank column (only for ReinMax variants)
+        rank_data = train_reinmax_ranks.get(method_name)
+        if rank_data is not None:
+            rank_cell = f"{rank_data[0]:.2f}±{rank_data[1]:.2f}"
+        else:
+            rank_cell = "-"
+        row += f"{rank_cell:^{col_width}}"
         print(row)
     
-    print("\n" + "="*130)
-    print("TEST ELBO TABLE (** = best, * = second best)")
-    print("="*130)
+    print("\n" + "="*165)
+    print("TEST ELBO TABLE (** = best, * = second best, ~ = third best)")
+    print("="*165)
     
     # Header
     print(header)
-    print("-" * (15 + col_width * len(configs)))
+    print("-" * (15 + col_width * (len(configs) + 1)))
     
     # Rows
     for method_key, method_name in methods_info:
@@ -487,9 +874,20 @@ def print_elbo_tables(stats, baseline_stats):
                     cell = f"**{cell}"
                 elif test_second[col_idx] == method_name:
                     cell = f"*{cell}"
+                elif test_third[col_idx] == method_name:
+                    cell = f"~{cell}"
+                else:
+                    cell = f"({cell})"
             else:
                 cell = "N/A"
             row += f"{cell:^{col_width}}"
+        # Add rank column (only for ReinMax variants)
+        rank_data = test_reinmax_ranks.get(method_name)
+        if rank_data is not None:
+            rank_cell = f"{rank_data[0]:.2f}±{rank_data[1]:.2f}"
+        else:
+            rank_cell = "-"
+        row += f"{rank_cell:^{col_width}}"
         print(row)
     
     # ==================== LATEX TABLES ====================
@@ -499,15 +897,15 @@ def print_elbo_tables(stats, baseline_stats):
     
     # Train ELBO LaTeX table
     print("\n% Train ELBO Table")
-    print("% Best in bold, second best underlined")
+    print("% Best in bold, second best underlined, third best italic, rest grey")
     print("\\begin{table}[htbp]")
     print("\\centering")
-    print("\\caption{Train ELBO ($\\downarrow$) across different configurations. Best results are in \\textbf{bold}, second best are \\underline{underlined}.}")
+    print("\\caption{Train ELBO ($\\downarrow$) across different configurations. Best results are in \\textbf{bold}, second best are \\underline{underlined}, third best are \\textit{italic}.}")
     print("\\label{tab:train_elbo}")
     print("\\resizebox{\\textwidth}{!}{%")
-    print("\\begin{tabular}{l" + "c" * len(configs) + "}")
+    print("\\begin{tabular}{l" + "c" * len(configs) + "c}")
     print("\\toprule")
-    print("Method & " + " & ".join(config_labels) + " \\\\")
+    print("Method & " + " & ".join(config_labels) + " & Avg Rank \\\\")
     print("\\midrule")
     
     for method_key, method_name in methods_info:
@@ -519,9 +917,19 @@ def print_elbo_tables(stats, baseline_stats):
                     cell = f"\\textbf{{{cell}}}"
                 elif train_second[col_idx] == method_name:
                     cell = f"\\underline{{{cell}}}"
+                elif train_third[col_idx] == method_name:
+                    cell = f"\\textit{{{cell}}}"
+                else:
+                    cell = f"\\textcolor{{gray}}{{{cell}}}"
             else:
                 cell = "N/A"
             row_cells.append(cell)
+        # Add rank column (only for ReinMax variants)
+        rank_data = train_reinmax_ranks.get(method_name)
+        if rank_data is not None:
+            row_cells.append(f"{rank_data[0]:.2f}$\\pm${rank_data[1]:.2f}")
+        else:
+            row_cells.append("-")
         print(" & ".join(row_cells) + " \\\\")
     
     print("\\bottomrule")
@@ -530,15 +938,15 @@ def print_elbo_tables(stats, baseline_stats):
     
     # Test ELBO LaTeX table
     print("\n% Test ELBO Table")
-    print("% Best in bold, second best underlined")
+    print("% Best in bold, second best underlined, third best italic, rest grey")
     print("\\begin{table}[htbp]")
     print("\\centering")
-    print("\\caption{Test ELBO ($\\downarrow$) across different configurations. Best results are in \\textbf{bold}, second best are \\underline{underlined}.}")
+    print("\\caption{Test ELBO ($\\downarrow$) across different configurations. Best results are in \\textbf{bold}, second best are \\underline{underlined}, third best are \\textit{italic}.}")
     print("\\label{tab:test_elbo}")
     print("\\resizebox{\\textwidth}{!}{%")
-    print("\\begin{tabular}{l" + "c" * len(configs) + "}")
+    print("\\begin{tabular}{l" + "c" * len(configs) + "c}")
     print("\\toprule")
-    print("Method & " + " & ".join(config_labels) + " \\\\")
+    print("Method & " + " & ".join(config_labels) + " & Avg Rank \\\\")
     print("\\midrule")
     
     for method_key, method_name in methods_info:
@@ -550,9 +958,200 @@ def print_elbo_tables(stats, baseline_stats):
                     cell = f"\\textbf{{{cell}}}"
                 elif test_second[col_idx] == method_name:
                     cell = f"\\underline{{{cell}}}"
+                elif test_third[col_idx] == method_name:
+                    cell = f"\\textit{{{cell}}}"
+                else:
+                    cell = f"\\textcolor{{gray}}{{{cell}}}"
             else:
                 cell = "N/A"
             row_cells.append(cell)
+        # Add rank column (only for ReinMax variants)
+        rank_data = test_reinmax_ranks.get(method_name)
+        if rank_data is not None:
+            row_cells.append(f"{rank_data[0]:.2f}$\\pm${rank_data[1]:.2f}")
+        else:
+            row_cells.append("-")
+        print(" & ".join(row_cells) + " \\\\")
+    
+    print("\\bottomrule")
+    print("\\end{tabular}}")
+    print("\\end{table}")
+    
+    # ==================== TABLES SELECTED BY TEST LOSS ====================
+    # Build data for tables selected by test loss: (mean, std_error)
+    train_data_by_test = {}
+    test_data_by_test = {}
+    
+    for method_key, method_name in methods_info:
+        train_data_by_test[method_name] = []
+        test_data_by_test[method_name] = []
+        
+        for cat_dim, lat_dim in configs:
+            stat = get_best_result(method_key, cat_dim, lat_dim, metric='test_loss_mean')
+            if stat is not None:
+                train_data_by_test[method_name].append((stat['train_loss_mean'], stat['train_loss_std']))
+                test_data_by_test[method_name].append((stat['test_loss_mean'], stat['test_loss_std']))
+            else:
+                train_data_by_test[method_name].append((None, None))
+                test_data_by_test[method_name].append((None, None))
+    
+    train_best_by_test, train_second_by_test, train_third_by_test = find_top_three_per_column(train_data_by_test)
+    test_best_by_test, test_second_by_test, test_third_by_test = find_top_three_per_column(test_data_by_test)
+    
+    # Compute average ranks for tables selected by test loss (using per-seed ranking)
+    train_avg_ranks_by_test = compute_average_ranks_per_seed(metric='train_loss', selection_metric='test_loss_mean')
+    test_avg_ranks_by_test = compute_average_ranks_per_seed(metric='test_loss', selection_metric='test_loss_mean')
+    
+    # Compute ReinMax-only ranks for tables selected by test loss
+    train_reinmax_ranks_by_test = compute_reinmax_only_ranks(metric='train_loss', selection_metric='test_loss_mean')
+    test_reinmax_ranks_by_test = compute_reinmax_only_ranks(metric='test_loss', selection_metric='test_loss_mean')
+    
+    # ==================== PLAIN TEXT TABLES (SELECTED BY TEST) ====================
+    print("\n" + "="*165)
+    print("TRAIN ELBO TABLE - HYPERPARAMETERS SELECTED BY TEST LOSS (** = best, * = second best, ~ = third best)")
+    print("="*165)
+    
+    print(header)
+    print("-" * (15 + col_width * (len(configs) + 1)))
+    
+    for method_key, method_name in methods_info:
+        row = f"{method_name:<15}"
+        for col_idx, (val, std) in enumerate(train_data_by_test[method_name]):
+            if val is not None:
+                cell = f"{val:.2f}±{std:.2f}"
+                if train_best_by_test[col_idx] == method_name:
+                    cell = f"**{cell}"
+                elif train_second_by_test[col_idx] == method_name:
+                    cell = f"*{cell}"
+                elif train_third_by_test[col_idx] == method_name:
+                    cell = f"~{cell}"
+                else:
+                    cell = f"({cell})"
+            else:
+                cell = "N/A"
+            row += f"{cell:^{col_width}}"
+        # Add rank column (only for ReinMax variants)
+        rank_data = train_reinmax_ranks_by_test.get(method_name)
+        if rank_data is not None:
+            rank_cell = f"{rank_data[0]:.2f}±{rank_data[1]:.2f}"
+        else:
+            rank_cell = "-"
+        row += f"{rank_cell:^{col_width}}"
+        print(row)
+    
+    print("\n" + "="*165)
+    print("TEST ELBO TABLE - HYPERPARAMETERS SELECTED BY TEST LOSS (** = best, * = second best, ~ = third best)")
+    print("="*165)
+    
+    print(header)
+    print("-" * (15 + col_width * (len(configs) + 1)))
+    
+    for method_key, method_name in methods_info:
+        row = f"{method_name:<15}"
+        for col_idx, (val, std) in enumerate(test_data_by_test[method_name]):
+            if val is not None:
+                cell = f"{val:.2f}±{std:.2f}"
+                if test_best_by_test[col_idx] == method_name:
+                    cell = f"**{cell}"
+                elif test_second_by_test[col_idx] == method_name:
+                    cell = f"*{cell}"
+                elif test_third_by_test[col_idx] == method_name:
+                    cell = f"~{cell}"
+                else:
+                    cell = f"({cell})"
+            else:
+                cell = "N/A"
+            row += f"{cell:^{col_width}}"
+        # Add rank column (only for ReinMax variants)
+        rank_data = test_reinmax_ranks_by_test.get(method_name)
+        if rank_data is not None:
+            rank_cell = f"{rank_data[0]:.2f}±{rank_data[1]:.2f}"
+        else:
+            rank_cell = "-"
+        row += f"{rank_cell:^{col_width}}"
+        print(row)
+    
+    # ==================== LATEX TABLES (SELECTED BY TEST) ====================
+    print("\n" + "="*120)
+    print("LATEX TABLES (HYPERPARAMETERS SELECTED BY TEST LOSS)")
+    print("="*120)
+    
+    # Train ELBO LaTeX table (selected by test)
+    print("\n% Train ELBO Table (hyperparameters selected by test loss)")
+    print("% Best in bold, second best underlined, third best italic, rest grey")
+    print("\\begin{table}[htbp]")
+    print("\\centering")
+    print("\\caption{Train ELBO ($\\downarrow$) across different configurations (hyperparameters selected by test loss). Best results are in \\textbf{bold}, second best are \\underline{underlined}, third best are \\textit{italic}.}")
+    print("\\label{tab:train_elbo_by_test}")
+    print("\\resizebox{\\textwidth}{!}{%")
+    print("\\begin{tabular}{l" + "c" * len(configs) + "c}")
+    print("\\toprule")
+    print("Method & " + " & ".join(config_labels) + " & Avg Rank \\\\")
+    print("\\midrule")
+    
+    for method_key, method_name in methods_info:
+        row_cells = [method_name]
+        for col_idx, (val, std) in enumerate(train_data_by_test[method_name]):
+            if val is not None:
+                cell = f"{val:.2f}$\\pm${std:.2f}"
+                if train_best_by_test[col_idx] == method_name:
+                    cell = f"\\textbf{{{cell}}}"
+                elif train_second_by_test[col_idx] == method_name:
+                    cell = f"\\underline{{{cell}}}"
+                elif train_third_by_test[col_idx] == method_name:
+                    cell = f"\\textit{{{cell}}}"
+                else:
+                    cell = f"\\textcolor{{gray}}{{{cell}}}"
+            else:
+                cell = "N/A"
+            row_cells.append(cell)
+        # Add rank column (only for ReinMax variants)
+        rank_data = train_reinmax_ranks_by_test.get(method_name)
+        if rank_data is not None:
+            row_cells.append(f"{rank_data[0]:.2f}$\\pm${rank_data[1]:.2f}")
+        else:
+            row_cells.append("-")
+        print(" & ".join(row_cells) + " \\\\")
+    
+    print("\\bottomrule")
+    print("\\end{tabular}}")
+    print("\\end{table}")
+    
+    # Test ELBO LaTeX table (selected by test)
+    print("\n% Test ELBO Table (hyperparameters selected by test loss)")
+    print("% Best in bold, second best underlined, third best italic, rest grey")
+    print("\\begin{table}[htbp]")
+    print("\\centering")
+    print("\\caption{Test ELBO ($\\downarrow$) across different configurations (hyperparameters selected by test loss). Best results are in \\textbf{bold}, second best are \\underline{underlined}, third best are \\textit{italic}.}")
+    print("\\label{tab:test_elbo_by_test}")
+    print("\\resizebox{\\textwidth}{!}{%")
+    print("\\begin{tabular}{l" + "c" * len(configs) + "c}")
+    print("\\toprule")
+    print("Method & " + " & ".join(config_labels) + " & Avg Rank \\\\")
+    print("\\midrule")
+    
+    for method_key, method_name in methods_info:
+        row_cells = [method_name]
+        for col_idx, (val, std) in enumerate(test_data_by_test[method_name]):
+            if val is not None:
+                cell = f"{val:.2f}$\\pm${std:.2f}"
+                if test_best_by_test[col_idx] == method_name:
+                    cell = f"\\textbf{{{cell}}}"
+                elif test_second_by_test[col_idx] == method_name:
+                    cell = f"\\underline{{{cell}}}"
+                elif test_third_by_test[col_idx] == method_name:
+                    cell = f"\\textit{{{cell}}}"
+                else:
+                    cell = f"\\textcolor{{gray}}{{{cell}}}"
+            else:
+                cell = "N/A"
+            row_cells.append(cell)
+        # Add rank column (only for ReinMax variants)
+        rank_data = test_reinmax_ranks_by_test.get(method_name)
+        if rank_data is not None:
+            row_cells.append(f"{rank_data[0]:.2f}$\\pm${rank_data[1]:.2f}")
+        else:
+            row_cells.append("-")
         print(" & ".join(row_cells) + " \\\\")
     
     print("\\bottomrule")
@@ -575,7 +1174,7 @@ def plot_gradient_analysis(trajectories, cat_dim, lat_dim, output_dir='./figures
     
     baseline_methods = ['gumbel', 'rao_gumbel', 'gst-1.0', 'st', 'reinmax']
     # new_methods = ['reinmax_v2', 'reinmax_v3']
-    new_methods = ['reinmax_v3']
+    new_methods = ['reinmax_v3', 'reinmax_cv']
     all_methods = baseline_methods + new_methods
     
     # Create figure with 2x2 subplots
@@ -717,7 +1316,7 @@ def plot_efficiency_frontier(trajectories, cat_dim, lat_dim, output_dir='./figur
     
     baseline_methods = ['gumbel', 'rao_gumbel', 'gst-1.0', 'st', 'reinmax']
     # new_methods = ['reinmax_v2', 'reinmax_v3']
-    new_methods = ['reinmax_v3']
+    new_methods = ['reinmax_v3', 'reinmax_cv']
     all_methods = baseline_methods + new_methods
     
     fig, axes = plt.subplots(1, 2, figsize=(12, 5))
@@ -812,6 +1411,7 @@ def print_gradient_stats_table(stats, baseline_stats):
         ('reinmax', 'ReinMax'),
         # ('reinmax_v2', 'ReinMax-V2'),
         ('reinmax_v3', 'ReinMax-V3'),
+        ('reinmax_cv', 'ReinMax-CV'),
     ]
     
     configs = [(8, 4), (4, 24), (8, 16), (16, 12), (64, 8), (10, 30)]
@@ -886,6 +1486,9 @@ def main():
     
     print(f"Found {len(results)} configurations")
     
+    # Check reinmax_cv file status
+    check_reinmax_cv_status()
+    
     print("Computing statistics...")
     stats = compute_statistics(results)
     
@@ -907,7 +1510,7 @@ def main():
     # print_sample_std_comparison(stats, baseline_stats)
     
     print("\n\n")
-    print_elbo_tables(stats, baseline_stats)
+    print_elbo_tables(stats, baseline_stats, results, baseline_results)
     
     print("\n\nBest Results by Configuration and Method (New Methods Only)")
     print_best_results(stats)
@@ -930,6 +1533,10 @@ def load_full_trajectories(results_dir='./results'):
     # methods = ["reinmax_v2", "reinmax_v3"]
     methods = ["reinmax_v3"]
     seeds = range(10)
+    
+    # Define tau2 and eta options for reinmax_cv
+    tau2_options = [0.1, 0.3, 0.5, 0.7, 1.0, 1.1, 1.2, 1.3, 1.4, 1.5]
+    eta_options = [0.1, 0.3, 0.5, 0.7, 1.0, 1.5, 2.0]
     
     for cat_dim, lat_dim in zip(categorical_dim_options, latent_dim_options):
         for method in methods:
@@ -974,6 +1581,54 @@ def load_full_trajectories(results_dir='./results'):
                 except:
                     continue
     
+    # Handle reinmax_cv separately - find best tau2/eta by averaging across seeds first
+    print("\nFinding best eta and tau2 for reinmax_cv (averaging across seeds)...")
+    
+    for cat_dim, lat_dim in zip(categorical_dim_options, latent_dim_options):
+        # Get baseline reinmax hyperparameters for this configuration
+        key = ('reinmax', cat_dim, lat_dim)
+        if key not in baseline_hyperparameters:
+            continue
+            
+        baseline_lr, baseline_temp, baseline_optimizer = baseline_hyperparameters[key]
+        
+        # Collect full trajectories for all (eta, tau2) combinations across all seeds
+        combo_trajectories = {}  # (eta, tau2) -> {seed: metrics_array}
+        
+        for tau2 in tau2_options:
+            for eta in eta_options:
+                combo_trajectories[(eta, tau2)] = {}
+                for seed in seeds:
+                    fname = f"results_seed{seed}_reinmax_cv_cat{cat_dim}_lat{lat_dim}_opt{baseline_optimizer}_lr{baseline_lr}_temp{baseline_temp}_eta{eta}_tau2{tau2}.txt"
+                    fpath = results_path / fname
+                    
+                    if fpath.exists():
+                        try:
+                            data = np.loadtxt(fpath, delimiter=',')
+                            if len(data) >= 160:
+                                combo_trajectories[(eta, tau2)][seed] = data
+                        except Exception as e:
+                            pass
+        
+        # Find the best (eta, tau2) based on average final train loss across seeds
+        best_avg_loss = float('inf')
+        best_combo = None
+        
+        for (eta, tau2), seed_data in combo_trajectories.items():
+            if len(seed_data) >= 5:  # Require at least 5 seeds
+                avg_train_loss = np.mean([seed_data[s][-1, 0] for s in seed_data.keys()])
+                if avg_train_loss < best_avg_loss:
+                    best_avg_loss = avg_train_loss
+                    best_combo = (eta, tau2)
+        
+        # Store trajectories using the best (eta, tau2) for all seeds
+        if best_combo is not None:
+            config_key = (cat_dim, lat_dim, 'reinmax_cv', baseline_optimizer, baseline_lr, baseline_temp)
+            for seed, data in combo_trajectories[best_combo].items():
+                trajectories[config_key][seed] = data
+            
+            print(f"  {cat_dim}×{lat_dim}: best η={best_combo[0]}, τ²={best_combo[1]} (avg loss={best_avg_loss:.4f}, {len(combo_trajectories[best_combo])} seeds)")
+    
     return trajectories
 
 
@@ -1013,7 +1668,8 @@ def get_method_style(method):
         'st': {'color': '#d62728', 'linestyle': '-', 'marker': 'v', 'label': 'Straight-Through'},
         'reinmax': {'color': '#9467bd', 'linestyle': '-', 'marker': 'D', 'label': 'ReinMax'},
         # 'reinmax_v2': {'color': '#8c564b', 'linestyle': '--', 'marker': 'p', 'label': 'ReinMax-v2'},
-        'reinmax_v3': {'color': '#e377c2', 'linestyle': '--', 'marker': 'h', 'label': 'ReinMax-v3'},
+        'reinmax_v3': {'color': '#e377c2', 'linestyle': '--', 'marker': 'h', 'label': 'ReinMax-Rao'},
+        'reinmax_cv': {'color': '#8c564b', 'linestyle': '--', 'marker': 'p', 'label': 'ReinMax-CV'},
     }
     return styles.get(method, {'color': 'gray', 'linestyle': '-', 'marker': 'x', 'label': method})
 
@@ -1030,7 +1686,7 @@ def plot_losses_vs_epoch(trajectories, cat_dim, lat_dim, output_dir='./figures')
     
     baseline_methods = ['gumbel', 'rao_gumbel', 'gst-1.0', 'st', 'reinmax']
     # new_methods = ['reinmax_v2', 'reinmax_v3']
-    new_methods = ['reinmax_v3']
+    new_methods = ['reinmax_v3', 'reinmax_cv']
     all_methods = baseline_methods + new_methods
     
     # Create figure with two subplots (train and test)
@@ -1128,7 +1784,7 @@ def plot_sample_variance_vs_epoch(trajectories, cat_dim, lat_dim, output_dir='./
     
     baseline_methods = ['gumbel', 'rao_gumbel', 'gst-1.0', 'st', 'reinmax']
     # new_methods = ['reinmax_v2', 'reinmax_v3']
-    new_methods = ['reinmax_v3']
+    new_methods = ['reinmax_v3', 'reinmax_cv']
     all_methods = baseline_methods + new_methods
     
     fig, ax = plt.subplots(figsize=(7, 5))

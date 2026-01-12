@@ -76,7 +76,7 @@ def run(
     epochs=160,
 ):
     method = "reinmax_cv"
-    fname = f"./results/results_seed{seed}_{method}_cat{categorical_dim}_lat{latent_dim}_opt{optimizer_type}_lr{learning_rate}_temp{temperature}.txt"
+    fname = f"./results/results_seed{seed}_{method}_cat{categorical_dim}_lat{latent_dim}_opt{optimizer_type}_lr{learning_rate}_temp{temperature}_eta{eta}_tau2{tau2}.txt"
     # check if file exists
     import os
     if os.path.exists(fname):

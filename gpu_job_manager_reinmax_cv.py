@@ -183,15 +183,17 @@ class GPUJobManager:
 
 
 if __name__ == "__main__":
-    manager = GPUJobManager(num_gpus=8, jobs_per_gpu=3)
+    manager = GPUJobManager(num_gpus=12, jobs_per_gpu=3)
     
     # Define parameter grids for tau2 and eta
     tau2_options = [0.1, 0.3, 0.5, 0.7, 1.0, 1.1, 1.2, 1.3, 1.4, 1.5]
     eta_options = [0.1, 0.3, 0.5, 0.7, 1.0, 1.5, 2.0]
     
     # Configurations from baseline_hypers for reinmax
-    categorical_dim_options = [10, 4, 8, 16, 64, 8]
-    latent_dim_options = [30, 24, 16, 12, 8, 4]
+    # categorical_dim_options = [10, 4, 8, 16, 64, 8]
+    # latent_dim_options = [30, 24, 16, 12, 8, 4]
+    categorical_dim_options = [64]
+    latent_dim_options = [8]
     
     seeds = range(10)
     
