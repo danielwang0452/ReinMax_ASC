@@ -1,7 +1,7 @@
 import json
 from pathlib import Path
 
-json_dir = Path("results/results_reinmax_cv_16x12_2_radam")
+json_dir = Path("results/results_reinmax_8x16")
 
 #json_dir = Path("results_8x4")
 all_configs = {}
@@ -13,6 +13,7 @@ print(len(all_configs.keys()))
 # average the 10 seeds
 avg_results = {}
 for key, value in all_configs.items():
+    # filter
     average = [0, 0]
     #print(key)
     for k, v in value.items():
@@ -20,7 +21,7 @@ for key, value in all_configs.items():
         average[0] += v[0]# 0.1 * v[0]
         average[1] +=v[1]# 0.1 * v[1]
     avg_results[key] = average
-print(avg_results)
+    print(avg_results)
 
 # find min
 min_loss = 3000
