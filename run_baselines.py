@@ -176,7 +176,7 @@ class GPUJobManager:
 
 
 if __name__ == "__main__":
-    manager = GPUJobManager(num_gpus=8, jobs_per_gpu=3, log_dir='baseline_logs')
+    manager = GPUJobManager(num_gpus=1, jobs_per_gpu=5, log_dir='baseline_logs')
     
     seeds = range(10)
     

@@ -55,6 +55,9 @@ def check_cosine(
         activation="relu",
     ).to(device)
     model.compute_code = model.compute_code_track
+    if method == "reinmax_cv":
+        model.eta = 1.0
+        model.tau2 = 0.1
 
     # load model state
     model.load_state_dict(
