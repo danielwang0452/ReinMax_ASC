@@ -1,8 +1,8 @@
 import json
 from pathlib import Path
-
-json_dir = Path("results/results_reinmax_cv_8x16_radam")
-
+import numpy as np
+json_dir = Path("results/results_reinmax_cv_full")
+size = "8x4"
 #json_dir = Path("results_8x4")
 all_configs = {}
 
@@ -14,22 +14,39 @@ print(len(all_configs.keys()))
 avg_results = {}
 for key, value in all_configs.items():
     # filter
-    average = [0, 0]
-    #print(key)
-    for k, v in value.items():
-        if k[-1] == "0":
+    if size in key:
+        train_losses = np.zeros(len(value))
+        test_losses = np.zeros(len(value))
+        index = 0
+        for k, v in value.items():
         #print(v)
-            average[0] += v[0]# 0.1 * v[0]
-            average[1] += v[1]# 0.1 * v[1]
-    avg_results[key] = average
-    print(avg_results)
+            train_losses[index] = v[0]
+            test_losses[index] = v[1]
+            index += 1
+        avg_results[key] = [train_losses, test_losses]
+print(avg_results, len(avg_results))
 
 # find min
 min_loss = 3000
 for key, value in avg_results.items():
-    if value[0] < min_loss:
-        min_loss = value[0]
-        min_train_loss = value[1]
+    train_losses = value[0]
+    test_losses = value[1]
+    if train_losses.mean() < min_loss:
+        min_loss = train_losses.mean()
+
+        train_std = train_losses.std()
+        test_std = test_losses.std()
+        min_train_loss = train_losses.mean()
+        min_test_loss = test_losses.mean()
         min_key = key
 
-print(min_key, min_loss, min_train_loss)
+print(min_key)
+print(min_train_loss, train_std)
+print(min_test_loss, test_std)
+
+#reinmax_cv-160-RAdam-10x30-0.7-0.0005-1.0
+#reinmax_cv-160-RAdam-64x8-0.7-0.0005-1.5
+#reinmax_cv-160-RAdam-16x12-0.7-0.0005-1.5
+#reinmax_cv-160-RAdam-8x16-1.1-0.0005-1.5
+#reinmax_cv-160-Adam-4x24-1.3-0.0005-1.5
+#reinmax_cv-160-Adam-8x4-1.0-0.0005-1.5
